@@ -276,7 +276,12 @@ def main():
     parser.add_argument("--public-url", action="store_true")
     parser.add_argument("--expire-once", action="store_true")
     parser.add_argument("--port-file", default=None)
+    parser.add_argument("--env-file", default=None)
     args = parser.parse_args()
+
+    if args.env_file:
+        with open(args.env_file, "w", encoding="utf-8") as env_file:
+            json.dump(dict(os.environ), env_file, ensure_ascii=False)
 
     if args.prompt:
         print(

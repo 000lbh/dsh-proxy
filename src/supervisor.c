@@ -18,6 +18,8 @@
 #include "net.h"
 #include "util.h"
 
+extern char **environ;
+
 struct dsp_supervisor {
 	const dsp_config *config;
 	dsp_upstream *upstream;
@@ -25,6 +27,7 @@ struct dsp_supervisor {
 	pid_t pid;
 	int out_fd;
 	int in_fd;
+	char **child_env;
 
 	int stopping;
 	int warned_token_timeout;
@@ -123,17 +126,146 @@ static int build_dsh_command(const dsp_config *config, char *out,
 	return 0;
 }
 
+
+static const char *const scrubbed_environment_names[] = {
+	"DISPLAY",
+	"WAYLAND_DISPLAY",
+	"WAYLAND_SOCKET",
+	"XAUTHORITY",
+	"XDG_SESSION_TYPE",
+	"XDG_SESSION_ID",
+	"XDG_SESSION_DESKTOP",
+	"XDG_SESSION_PATH",
+	"XDG_SESSION_CLASS",
+	"XDG_SEAT",
+	"XDG_SEAT_PATH",
+	"XDG_CURRENT_DESKTOP",
+	"XDG_RUNTIME_DIR",
+	"DESKTOP_SESSION",
+	"GDMSESSION",
+	"GNOME_DESKTOP_SESSION_ID",
+	"GNOME_SHELL_SESSION_MODE",
+	"KDE_FULL_SESSION",
+	"KDE_SESSION_VERSION",
+	"KDE_SESSION_UID",
+	"DBUS_SESSION_BUS_ADDRESS",
+	"DBUS_SYSTEM_BUS_ADDRESS",
+	"DBUS_STARTER_ADDRESS",
+	"DBUS_STARTER_BUS_TYPE",
+	"AT_SPI_BUS_ADDRESS",
+	"AT_SPI_BUS",
+	"XDG_ACTIVATION_TOKEN",
+	"DESKTOP_STARTUP_ID",
+	"QT_QPA_PLATFORM",
+	"QT_QPA_PLATFORMTHEME",
+	"GDK_BACKEND",
+	"BROWSER",
+	"PULSE_SERVER",
+	"PIPEWIRE_REMOTE",
+};
+
+static int environment_name_equals(const char *entry, const char *name)
+{
+	size_t len = strlen(name);
+
+	return strncmp(entry, name, len) == 0 && entry[len] == '=';
+}
+
+static int environment_name_is_scrubbed(const char *entry)
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(scrubbed_environment_names) /
+				sizeof(scrubbed_environment_names[0]);
+	     i++) {
+		if (environment_name_equals(entry,
+					    scrubbed_environment_names[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static void free_child_environment(char **environment)
+{
+	size_t i;
+
+	if (environment == NULL)
+		return;
+	for (i = 0; environment[i] != NULL; i++)
+		free(environment[i]);
+	free(environment);
+}
+
+static char **build_child_environment(const dsp_config *config,
+				      size_t *count_out)
+{
+	size_t total = 0;
+	size_t out = 0;
+	size_t i;
+	char **environment;
+	int override_home = config->dsh_home[0] != '\0';
+
+	if (environ != NULL) {
+		while (environ[total] != NULL)
+			total++;
+	}
+	environment = calloc(total + 2, sizeof(*environment));
+	if (environment == NULL)
+		return NULL;
+
+	for (i = 0; i < total; i++) {
+		const char *entry = environ[i];
+
+		if (environment_name_is_scrubbed(entry))
+			continue;
+		if (override_home && environment_name_equals(entry, "DSH_HOME"))
+			continue;
+		environment[out] = dsp_strdup(entry);
+		if (environment[out] == NULL) {
+			free_child_environment(environment);
+			return NULL;
+		}
+		out++;
+	}
+	if (override_home) {
+		size_t length = strlen("DSH_HOME=") +
+				strlen(config->dsh_home) + 1;
+
+		environment[out] = malloc(length);
+		if (environment[out] == NULL) {
+			free_child_environment(environment);
+			return NULL;
+		}
+		snprintf(environment[out], length, "DSH_HOME=%s",
+			 config->dsh_home);
+		out++;
+	}
+	environment[out] = NULL;
+	*count_out = out;
+	return environment;
+}
+
 static int spawn_child(dsp_supervisor *supervisor)
 {
 	int in_pipe[2] = { -1, -1 };
 	int out_pipe[2] = { -1, -1 };
 	pid_t pid;
 	char command[4096];
+	size_t environment_count = 0;
 
 	if (build_dsh_command(supervisor->config, command, sizeof(command)) < 0) {
 		log_error("dsh command is too long after adding --port");
 		return -1;
 	}
+	free_child_environment(supervisor->child_env);
+	supervisor->child_env = build_child_environment(supervisor->config,
+							 &environment_count);
+	if (supervisor->child_env == NULL) {
+		log_error("cannot build a scrubbed environment for dsh");
+		return -1;
+	}
+	log_debug("dsh environment: %zu variables (desktop, Wayland, X11, "
+		  "session and D-Bus variables scrubbed)", environment_count);
 	if (pipe(in_pipe) < 0) {
 		log_error("cannot create dsh stdin pipe: %s", strerror(errno));
 		return -1;
@@ -173,9 +305,16 @@ static int spawn_child(dsp_supervisor *supervisor)
 		signal(SIGINT, SIG_DFL);
 		signal(SIGPIPE, SIG_DFL);
 		signal(SIGHUP, SIG_DFL);
-		if (supervisor->config->dsh_home[0] != '\0')
-			(void)setenv("DSH_HOME", supervisor->config->dsh_home, 1);
-		execl("/bin/sh", "sh", "-c", command, (char *)NULL);
+		{
+			char *const arguments[] = {
+				(char *)"sh",
+				(char *)"-c",
+				command,
+				NULL
+			};
+
+			execve("/bin/sh", arguments, supervisor->child_env);
+		}
 		_exit(127);
 	}
 
@@ -572,6 +711,7 @@ void dsp_supervisor_destroy(dsp_supervisor *supervisor)
 		return;
 	if (supervisor->pid > 0)
 		dsp_supervisor_stop(supervisor);
+	free_child_environment(supervisor->child_env);
 	dsp_buf_free(&supervisor->output);
 	free(supervisor);
 }

@@ -5,12 +5,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$ROOT/tests/.tmp"
 PROXY_LOG="$TMP/proxy.log"
+ENV_FILE="$TMP/dsh-env.json"
 MOCK_PORT="${MOCK_PORT:-18099}"
 PROXY_PORT="${PROXY_PORT:-18080}"
 PROXY_PID=""
 
 mkdir -p "$TMP"
-rm -f "$PROXY_LOG"
+rm -f "$PROXY_LOG" "$ENV_FILE"
 chmod +x "$ROOT/tests/mock_dsh.py" "$ROOT/tests/ws_check.py"
 
 cleanup() {
@@ -29,8 +30,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
+DISPLAY=:99 \
+WAYLAND_DISPLAY=wayland-fake \
+XDG_RUNTIME_DIR="$TMP/fake-runtime" \
+XDG_SESSION_TYPE=wayland \
+XDG_CURRENT_DESKTOP=FAKE \
+KDE_FULL_SESSION=true \
+DBUS_SESSION_BUS_ADDRESS="unix:path=$TMP/fake-bus" \
+DSH_HOME="$TMP/inherited-dsh-home" \
 "$ROOT/dsh-proxy" -l "127.0.0.1:$PROXY_PORT" \
-	-d "python3 $ROOT/tests/mock_dsh.py --port $MOCK_PORT --prompt --delay-token 3 --public-url --expire-once" \
+	-d "python3 $ROOT/tests/mock_dsh.py --port $MOCK_PORT --prompt --delay-token 3 --public-url --expire-once --env-file $ENV_FILE" \
 	-u "127.0.0.1:$MOCK_PORT" \
 	-t 30 -v >"$PROXY_LOG" 2>&1 &
 PROXY_PID=$!
@@ -68,6 +77,29 @@ grep -q "auto-answered a dsh install/update prompt" "$PROXY_LOG"
 grep -q "mock: prompt answered with y" "$PROXY_LOG"
 grep -q "upstream=127.0.0.1:$MOCK_PORT" "$PROXY_LOG"
 grep -q "dsh rejected the injected session cookie" "$PROXY_LOG"
+echo "ok"
+
+echo "== dsh environment is scrubbed =="
+python3 - "$ENV_FILE" "$TMP/inherited-dsh-home" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as env_file:
+    env = json.load(env_file)
+for key in (
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR",
+    "XDG_SESSION_TYPE",
+    "XDG_CURRENT_DESKTOP",
+    "KDE_FULL_SESSION",
+    "DBUS_SESSION_BUS_ADDRESS",
+):
+    assert key not in env, f"{key} leaked into dsh: {env.get(key)!r}"
+assert env.get("HOME"), "HOME should be preserved"
+assert env.get("PATH"), "PATH should be preserved"
+assert env.get("DSH_HOME") == sys.argv[2], env.get("DSH_HOME")
+PY
 echo "ok"
 
 echo "== direct dsh requires auth =="

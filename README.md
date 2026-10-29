@@ -24,6 +24,7 @@ dsh web: http://127.0.0.1:3080/?token=<随机串>
 - 自动拉起 dsh；dsh 退出后从 `RESTART_DELAY`（默认 5s）开始指数退避重启，上限 30s。
 - **dsh 端口随机**：默认给 dsh 传 `--port 0`，由系统分配空闲高端口；代理从 dsh 打印的 token URL 自动发现实际端口，不需要手工挑端口。
 - **dsh 绝不以 root 运行**：代理启动时检查 `geteuid() == 0`，是 root 就直接退出；systemd --user 单元让代理和 dsh 都以当前用户运行。
+- **清理桌面会话环境**：启动 dsh 前重建环境，去掉 `DISPLAY`、`WAYLAND_DISPLAY`、`XAUTHORITY`、`XDG_RUNTIME_DIR`、`DBUS_SESSION_BUS_ADDRESS`、桌面/seat/session/portal 等变量；保留 `HOME`、`PATH`、`DSH_HOME`、`SSH_AUTH_SOCK` 等运行必需项。
 - 自动回答安装/更新提示：`Ok to proceed? (y)`、`(y/N)`、`[Y/n]`、`Continue?`、`Do you want to...` 等，自动向子进程 stdin 写 `y`，然后继续等待。等待 token 超时只告警，不会杀掉正在更新的 dsh。
 - 从 dsh 输出解析 token；dsh 重启/更新后自动重新获取并刷新 cookie。
 - 定时重新交换 cookie；上游返回 401 时也会自动刷新。
@@ -198,6 +199,27 @@ sudo systemctl enable --now dsh-proxy
 
 > 不要给 unit 加 `ProtectHome=yes` / `ProtectSystem=strict` 之类的限制：DSH 需要真实的 `~/.dsh`、自身子进程沙箱和网络。确有需要请逐项验证。
 
+## dsh 的运行环境
+
+为了避免 dsh 继承图形会话、Wayland/X11、D-Bus 或桌面 portal，代理在 fork 后不是简单 `exec`，而是用一份**重建过的 envp** 启动 `/bin/sh -c DSH_CMD`。以下变量会被移除：
+
+```text
+DISPLAY, WAYLAND_DISPLAY, WAYLAND_SOCKET, XAUTHORITY
+XDG_SESSION_*, XDG_SEAT*, XDG_CURRENT_DESKTOP, XDG_RUNTIME_DIR
+DESKTOP_SESSION, GDMSESSION, GNOME_DESKTOP_SESSION_ID, GNOME_SHELL_SESSION_MODE
+KDE_FULL_SESSION, KDE_SESSION_VERSION, KDE_SESSION_UID
+DBUS_SESSION_BUS_ADDRESS, DBUS_SYSTEM_BUS_ADDRESS,
+DBUS_STARTER_ADDRESS, DBUS_STARTER_BUS_TYPE
+AT_SPI_BUS_ADDRESS, AT_SPI_BUS
+XDG_ACTIVATION_TOKEN, DESKTOP_STARTUP_ID
+QT_QPA_PLATFORM, QT_QPA_PLATFORMTHEME, GDK_BACKEND
+BROWSER, PULSE_SERVER, PIPEWIRE_REMOTE
+```
+
+保留 `HOME`、`PATH`、`DSH_HOME`、`TERM`、`LANG`、`SSH_AUTH_SOCK`、代理相关变量等。`DSH_HOME` 配置非空时会覆盖继承值。
+
+这意味着 dsh 及其工具不会打开浏览器/GUI、不会连接你的桌面 D-Bus/portal；如果某个工具确实需要音频或桌面集成，它不会自动获得这些会话变量。代理日志的 `debug` 级别会打印保留的变量数量（不打印值）。
+
 ## 更新提示是怎么处理的
 
 代理持续读取 dsh 的 stdout/stderr（合并到同一个管道）。一旦在最近的输出里发现常见交互提示，并且 `AUTO_YES=1`，就向子进程 stdin 写 `y\n`，同一提示 2 秒内不会重复回答：
@@ -303,6 +325,7 @@ make check
 - SSE 流式响应；
 - WebSocket 握手与双向 echo；
 - 杀掉 dsh 后自动重启、重新获取 token（再次自动回答提示）；
+- 设置假的 `DISPLAY` / `WAYLAND_DISPLAY` / `DBUS_SESSION_BUS_ADDRESS` 等变量后，确认 mock dsh 进程看不到它们，同时 `HOME` / `PATH` / `DSH_HOME` 保留；
 - 默认追加 `--port 0`，mock dsh 由系统分配随机端口，代理从打印的 URL 正确发现该端口。
 
 测试会使用 `127.0.0.1:18080`（主代理）、`127.0.0.1:18099`（固定端口 mock）以及 `127.0.0.1:18081`（随机端口测试代理）；可用 `PROXY_PORT` / `MOCK_PORT` / `RANDOM_PROXY_PORT` 覆盖。
