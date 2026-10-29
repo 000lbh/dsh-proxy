@@ -1,0 +1,31 @@
+# System-wide alternative. The recommended setup is packaging/dsh-proxy.user.service
+# (systemd --user). Keep User= set: dsh must never run as root, and dsh-proxy
+# refuses to start when its effective uid is 0.
+[Unit]
+Description=DSH token-injecting reverse proxy
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=lbh
+Group=lbh
+WorkingDirectory=/home/lbh
+Environment=HOME=/home/lbh
+Environment=DSH_HOME=/home/lbh/.dsh
+Environment=PATH=/home/lbh/.npm/_npx/1e7f6d9597241db0/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/dsh-proxy --config /etc/dsh-proxy/dsh-proxy.conf
+Restart=always
+RestartSec=3
+TimeoutStopSec=45
+KillMode=control-group
+LimitNOFILE=65536
+
+# The proxy supervises dsh, and DSH needs the real home directory, its own
+# subprocess sandbox, and network access. Avoid ProtectHome/ProtectSystem and
+# similar hardening here unless you have verified DSH still works.
+
+[Install]
+WantedBy=multi-user.target

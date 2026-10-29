@@ -1,0 +1,6 @@
+dsh-proxy
+src/*.o
+tests/.tmp/
+tests/__pycache__/
+.test-dsh/
+*.log
